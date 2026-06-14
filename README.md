@@ -90,3 +90,33 @@ npm run preview
 2.  **RPF Officer**: Focuses on security incidents, track intrusions, and fire containment.
 3.  **Medical Staff**: Primary responder for medical emergencies, first-aid logs, and patient transports.
 4.  **Ticket Checking (TTE)**: Coordinates boarding queues, platform crowds, and assists other roles.
+
+---
+
+## 📦 Deploying to GitHub Pages
+
+Since this application uses client-side state (Zustand persistent local storage), it runs fully inside the browser and is optimized for static hosting on GitHub Pages.
+
+### Method 1: Automated Deployment (GitHub Actions)
+
+We have configured a GitHub Actions workflow in `.github/workflows/deploy.yml`. 
+
+1. Push your changes to your `main` branch on GitHub:
+   ```bash
+   git add .
+   git commit -m "Configure deployment and features"
+   git push origin main
+   ```
+2. Go to your repository settings on GitHub (`Settings` -> `Pages`).
+3. Under **Build and deployment** -> **Source**, select **Deploy from a branch**.
+4. Set the branch to `gh-pages` and folder to `/ (root)`.
+5. GitHub will automatically build and publish the console to `https://Anshulpj12.github.io/AVRI/`.
+
+### Method 2: Manual CLI Deployment
+
+You can build and deploy the application manually from your local terminal:
+
+```bash
+npm run deploy
+```
+This script will compile the static files and push the `dist/client` directory to the `gh-pages` branch on your remote origin repository.
