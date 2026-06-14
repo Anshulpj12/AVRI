@@ -103,7 +103,7 @@ export function generateCoaches(capacity: number, estimatedPax: number, coachCou
   };
 
   // General Unreserved (Front)
-  addCoachesOfType("GEN", "general", Math.floor(generalCount / 2));
+  addCoachesOfType("GEN-F", "general", Math.floor(generalCount / 2));
   
   // Sleeper Class
   addCoachesOfType("S", "sleeper", sleeperCount);
@@ -115,7 +115,7 @@ export function generateCoaches(capacity: number, estimatedPax: number, coachCou
   addCoachesOfType("B", "ac", acCount);
   
   // General Unreserved (Rear)
-  addCoachesOfType("GEN", "general", Math.ceil(generalCount / 2));
+  addCoachesOfType("GEN-R", "general", Math.ceil(generalCount / 2));
 
   // Correct small rounding errors to match estimatedPax
   if (estimatedPax > 0 && coaches.length > 2) {
