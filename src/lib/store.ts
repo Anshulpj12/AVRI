@@ -1,14 +1,15 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { TRAINS, type Train, SOP_TEMPLATES } from "./ndls-data";
+import { TRAINS, type Train, SOP_TEMPLATES, ZONES, PLATFORMS, type Zone, type PlatformInfo } from "./ndls-data";
 
-export type Role = "station-master" | "rpf" | "medical" | "ticket";
+export type Role = "station-master" | "rpf" | "medical" | "ticket" | "crowd";
 
 export const ROLE_META: Record<Role, { label: string; color: string; emoji: string }> = {
   "station-master": { label: "Station Master", color: "primary", emoji: "🚉" },
   "rpf":            { label: "RPF Officer", color: "info", emoji: "🛡️" },
   "medical":        { label: "Medical Staff", color: "success", emoji: "⚕️" },
   "ticket":         { label: "Ticket Checking", color: "accent", emoji: "🎫" },
+  "crowd":          { label: "Crowd Management", color: "warning", emoji: "👥" },
 };
 
 export type IncidentType = "medical" | "intrusion" | "crowd" | "fire";
@@ -62,6 +63,13 @@ export interface Notification {
   kind: "incident" | "assignment" | "sop" | "emergency" | "system" | "assist";
 }
 
+export interface TrainDeployment {
+  trainId: string;
+  required: { rpf: number; ticket: number; crowd: number };
+  accepted: { rpf: string[]; ticket: string[]; crowd: string[] }; // staff names who accepted
+  status: "pending" | "dispatched" | "complete";
+}
+
 export type QueuedAction =
   | { id: string; ts: number; kind: "notify"; payload: Notification };
 
@@ -76,6 +84,7 @@ const DEFAULT_RULES: AlertRules = {
   "rpf":            { medical: "P2", fire: "P1", intrusion: "P1", crowd: "P2" },
   "medical":        { medical: "P1", fire: "P1", intrusion: "P3", crowd: "P2" },
   "ticket":         { medical: "P3", fire: "P2", intrusion: "P3", crowd: "P2" },
+  "crowd":          { medical: "P2", fire: "P1", intrusion: "P3", crowd: "P1" },
 };
 
 interface AppState {
@@ -88,6 +97,9 @@ interface AppState {
   queue: QueuedAction[];
   emergencyActive: boolean;
   alertRules: AlertRules;
+  zones: Zone[];
+  platforms: PlatformInfo[];
+  deployments: Record<string, TrainDeployment>;
 
   login: (role: Role, name: string, badge: string) => void;
   logout: () => void;
@@ -113,6 +125,16 @@ interface AppState {
   resolveEmergency: () => void;
   tickTrains: () => void;
   escalateStale: () => void;
+
+  // Digital map editor actions
+  addZone: (z: Omit<Zone, "id">) => void;
+  deleteZone: (id: string) => void;
+  updatePlatform: (id: number, patch: Partial<PlatformInfo>) => void;
+
+  // Train handling deployment actions
+  deployStaff: (trainId: string) => void;
+  acceptDuty: (trainId: string, role: Role, staffName: string) => void;
+  requestMedicalBackup: (trainId: string, coachName: string, platform: number, desc: string) => void;
 }
 
 const priorityFor = (t: IncidentType): Priority =>
@@ -124,6 +146,7 @@ const UNIT_POOL: Record<Role, string[]> = {
   "rpf": ["RPF Squad Alpha", "RPF Squad Bravo", "RPF Quick Reaction"],
   "medical": ["Medical Team 1", "Medical Team 2", "Paramedic Cart"],
   "ticket": ["TTE Group North", "TTE Group South"],
+  "crowd": ["Crowd Patrol A", "Crowd Patrol B", "Platform Marshals"],
   "station-master": ["Duty Officer", "Deputy SM"],
 };
 
@@ -177,6 +200,9 @@ export const useApp = create<AppState>()(
         queue: [],
         emergencyActive: false,
         alertRules: DEFAULT_RULES,
+        zones: ZONES,
+        platforms: PLATFORMS,
+        deployments: {},
 
         login: (role, name, badge) => set({ session: { role, name, badge } }),
         logout: () => set({ session: { role: null, name: "", badge: "" } }),
@@ -308,9 +334,9 @@ export const useApp = create<AppState>()(
               },
             ),
           });
-          const allRoles: Role[] = ["station-master", "rpf", "medical", "ticket"];
+          const allRoles: Role[] = ["station-master", "rpf", "medical", "ticket", "crowd"];
           notifyRoles(allRoles.filter((r) => r !== a.role), {
-            priority: "P2", kind: "assist", incidentId, assignmentId,
+            priority: "P2", kind: "assist", incidentId, assignmentId: a.id,
             title: `Assist requested · ${a.unit}`,
             body: `${ROLE_META[a.role].label} needs backup on PF ${inc.platform}${note ? ` — ${note}` : ""}.`,
           });
@@ -386,13 +412,13 @@ export const useApp = create<AppState>()(
             priority: "P1",
             createdAt: Date.now(),
             primaryRole: "station-master",
-            assistRoles: ["rpf", "medical", "ticket"],
+            assistRoles: ["rpf", "medical", "ticket", "crowd"],
             sop,
             assignments: [],
             reportedBy: get().session.role ?? "station-master",
           };
           set({ incidents: [inc, ...get().incidents], emergencyActive: true });
-          notifyRoles(["all", "rpf", "medical", "ticket", "station-master"], {
+          notifyRoles(["all", "rpf", "medical", "ticket", "crowd", "station-master"], {
             priority: "P1", kind: "emergency", incidentId: inc.id,
             title: "P1 · STATION-WIDE EMERGENCY",
             body: "All units report to PF 3. Acknowledge immediately.",
@@ -406,7 +432,19 @@ export const useApp = create<AppState>()(
             trains: get().trains.map((t) => {
               const drift = Math.round((Math.random() - 0.5) * t.capacity * 0.04);
               const est = Math.max(0, Math.min(t.capacity, t.estimatedPax + drift));
-              return { ...t, estimatedPax: est };
+              
+              let m = t.minutesToArrival;
+              let status = t.status;
+              if (status !== "departed") {
+                if (m > 0) {
+                  m -= 1;
+                } else if (m === 0) {
+                  status = status === "arriving" ? "boarding" : status === "on-time" || status === "delayed" ? "arriving" : status;
+                  m = -1;
+                }
+              }
+              
+              return { ...t, estimatedPax: est, minutesToArrival: m, status };
             }),
             lastSync: get().online ? Date.now() : get().lastSync,
           });
@@ -433,11 +471,135 @@ export const useApp = create<AppState>()(
           });
           if (changed) set({ incidents });
         },
+
+        // Map Editor Actions
+        addZone: (z) => {
+          const newZone: Zone = { ...z, id: uid("Z") };
+          set({ zones: [...get().zones, newZone] });
+          notifyRoles(["station-master"], {
+            priority: "P3", kind: "system",
+            title: "Map Updated: Zone Added",
+            body: `New zone "${newZone.label}" (${newZone.type}) configured by Station Master.`,
+          });
+        },
+
+        deleteZone: (id) => {
+          const zone = get().zones.find((z) => z.id === id);
+          if (!zone) return;
+          set({ zones: get().zones.filter((z) => z.id !== id) });
+          notifyRoles(["station-master"], {
+            priority: "P3", kind: "system",
+            title: "Map Updated: Zone Removed",
+            body: `Zone "${zone.label}" removed from station layout.`,
+          });
+        },
+
+        updatePlatform: (id, patch) => {
+          set({
+            platforms: get().platforms.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+          });
+          notifyRoles(["station-master"], {
+            priority: "P3", kind: "system",
+            title: `Platform PF ${id} Updated`,
+            body: `Configuration modified for Platform ${id} (Length: ${patch.length}m, Type: ${patch.type}).`,
+          });
+        },
+
+        // Train Handling Deployment Actions
+        deployStaff: (trainId) => {
+          const train = get().trains.find((t) => t.id === trainId);
+          if (!train) return;
+          
+          const capFactor = train.capacity / 1000;
+          const delayFactor = train.delayMin > 0 ? 1.4 : 1.0;
+          
+          const rpf = Math.max(1, Math.round(3 * capFactor * delayFactor));
+          const ticket = Math.max(1, Math.round(2 * capFactor));
+          const crowd = Math.max(1, Math.round(4 * capFactor * delayFactor));
+          
+          const newDep: TrainDeployment = {
+            trainId,
+            required: { rpf, ticket, crowd },
+            accepted: { rpf: [], ticket: [], crowd: [] },
+            status: "dispatched",
+          };
+          
+          set({
+            deployments: {
+              ...get().deployments,
+              [trainId]: newDep,
+            },
+          });
+          
+          // Send alerts only to RPF, Ticket Checking, and Crowd Management staff initially!
+          notifyRoles(["rpf", "ticket", "crowd"], {
+            priority: "P2", kind: "assignment",
+            title: `Train Duty Dispatch: PF ${train.platform}`,
+            body: `Deploying staff for ${train.number} (${train.name}). Required: RPF (${rpf}), Ticket (${ticket}), Crowd (${crowd}).`,
+          });
+        },
+
+        acceptDuty: (trainId, role, staffName) => {
+          const dep = get().deployments[trainId];
+          if (!dep) return;
+          if (role !== "rpf" && role !== "ticket" && role !== "crowd") return;
+          
+          const list = [...dep.accepted[role]];
+          if (list.includes(staffName)) return; // already accepted
+          
+          list.push(staffName);
+          const acceptedObj = { ...dep.accepted, [role]: list };
+          
+          const allFilled =
+            acceptedObj.rpf.length >= dep.required.rpf &&
+            acceptedObj.ticket.length >= dep.required.ticket &&
+            acceptedObj.crowd.length >= dep.required.crowd;
+            
+          const status = allFilled ? "complete" : "dispatched";
+          
+          set({
+            deployments: {
+              ...get().deployments,
+              [trainId]: { ...dep, accepted: acceptedObj, status },
+            },
+          });
+          
+          const train = get().trains.find((t) => t.id === trainId);
+          notifyRoles(["station-master"], {
+            priority: "P3", kind: "system",
+            title: "Duty Accepted",
+            body: `${staffName} (${ROLE_META[role].label}) accepted duty for Train ${train?.number ?? ""}.`,
+          });
+          
+          if (allFilled && train) {
+            notifyRoles(["station-master", "rpf", "ticket", "crowd"], {
+              priority: "P3", kind: "system",
+              title: `Deployment Complete · Train ${train.number}`,
+              body: `All required handling staff have accepted duties for Platform ${train.platform}.`,
+            });
+          }
+        },
+
+        requestMedicalBackup: (trainId, coachName, platform, desc) => {
+          const train = get().trains.find(t => t.id === trainId);
+          const details = train ? `${train.number} (${train.name})` : "Arriving Train";
+          
+          get().createIncident({
+            type: "medical",
+            platform,
+            zone: "middle",
+            description: `EMERGENCY MEDICAL TEAM NEEDED: Requested by staff at Coach ${coachName} of ${details}. ${desc}`,
+            primaryRole: "medical",
+            assistRoles: ["rpf", "station-master"],
+            reportedBy: get().session.role ?? "station-master",
+            priority: "P1",
+          });
+        },
       };
     },
     {
       name: STORE_KEY,
-      version: 3,
+      version: 4,
       migrate: (persisted: any, version) => {
         if (!persisted) return persisted;
         if (version < 2) {
@@ -452,6 +614,12 @@ export const useApp = create<AppState>()(
         if (version < 3) {
           persisted.alertRules = persisted.alertRules ?? DEFAULT_RULES;
         }
+        if (version < 4) {
+          persisted.zones = persisted.zones ?? ZONES;
+          persisted.platforms = persisted.platforms ?? PLATFORMS;
+          persisted.deployments = persisted.deployments ?? {};
+          persisted.alertRules = { ...DEFAULT_RULES, ...persisted.alertRules };
+        }
         return persisted;
       },
       partialize: (s) => ({
@@ -463,18 +631,18 @@ export const useApp = create<AppState>()(
         emergencyActive: s.emergencyActive,
         lastSync: s.lastSync,
         alertRules: s.alertRules,
+        zones: s.zones,
+        platforms: s.platforms,
+        deployments: s.deployments,
       }),
     },
   ),
 );
 
 // ─── Cross-tab live sync ────────────────────────────────────────────────
-// Any change persisted by one tab is rehydrated in every other open dashboard
-// instantly — zero-latency multi-screen coordination.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key === STORE_KEY) {
-      // Re-read persisted state from localStorage into the live store.
       useApp.persist.rehydrate();
     }
   });

@@ -1,5 +1,6 @@
 import { useApp } from "@/lib/store";
 import { STAFF_MATRIX } from "@/lib/ndls-data";
+import { useState } from "react";
 
 function safetyScore(incidents: { status: string }[]) {
   const unresolved = incidents.filter((i) => i.status !== "resolved").length;
@@ -66,7 +67,13 @@ export function CrowdPrediction() {
         <div className="col-span-2 mt-1">
           <div className="text-[10px] uppercase text-muted-foreground">Peak density</div>
           <div className="text-sm font-semibold">
-            PF {peak?.platform} · <span className="font-mono">{peak?.expected}</span>
+            {peak ? (
+              <>
+                PF {peak.platform} · <span className="font-mono">{peak.expected}</span>
+              </>
+            ) : (
+              <span className="text-muted-foreground italic text-xs">No active trains</span>
+            )}
           </div>
         </div>
       </div>
@@ -118,26 +125,94 @@ export function StaffAllocation() {
 }
 
 export function EmergencyButton() {
-  const { emergencyActive, triggerEmergency, resolveEmergency } = useApp();
-  if (emergencyActive) {
-    return (
-      <button
-        onClick={resolveEmergency}
-        className="w-full py-4 rounded-xl font-bold text-sm uppercase tracking-wider glow-danger animate-pulse"
-        style={{ background: "var(--gradient-danger)", color: "white" }}
-      >
-        ⚠ Emergency Active · Stand Down
-      </button>
-    );
-  }
+  const { emergencyActive, triggerEmergency, resolveEmergency, createIncident, session } = useApp();
+  const [showSim, setShowSim] = useState(false);
+
+  const triggerSim = (type: "intrusion" | "fire" | "medical" | "crowd", pf: number, zone: string, desc: string) => {
+    const primaryRole = type === "medical" ? "medical" : type === "intrusion" || type === "fire" ? "rpf" : "station-master";
+    const assistRoles: any[] = type === "medical" ? ["rpf", "station-master"] : ["medical", "station-master", "crowd", "ticket"];
+    
+    createIncident({
+      type,
+      platform: pf,
+      zone: zone as any,
+      description: `SIMULATED ALERT: ${desc}`,
+      primaryRole,
+      assistRoles,
+      reportedBy: "station-master",
+      priority: "P1",
+    });
+    setShowSim(false);
+  };
+
+  const isMaster = session.role === "station-master";
+
   return (
-    <button
-      onClick={() => {
-        if (confirm("Declare station-wide emergency? All units will be alerted on priority.")) triggerEmergency();
-      }}
-      className="w-full py-4 rounded-xl font-bold text-sm uppercase tracking-wider text-destructive border-2 border-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors"
-    >
-      🚨 Declare Emergency
-    </button>
+    <div className="flex flex-col gap-2 w-full">
+      {emergencyActive ? (
+        <button
+          onClick={resolveEmergency}
+          className="w-full py-4 rounded-xl font-bold text-sm uppercase tracking-wider glow-danger animate-pulse"
+          style={{ background: "var(--gradient-danger)", color: "white" }}
+        >
+          ⚠ Emergency Active · Stand Down
+        </button>
+      ) : (
+        <button
+          onClick={() => {
+            if (confirm("Declare station-wide emergency? All units will be alerted on priority.")) triggerEmergency();
+          }}
+          className="w-full py-4 rounded-xl font-bold text-sm uppercase tracking-wider text-destructive border-2 border-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors"
+        >
+          🚨 Declare Emergency
+        </button>
+      )}
+
+      {isMaster && (
+        <div className="relative">
+          <button
+            onClick={() => setShowSim(!showSim)}
+            className="w-full py-1.5 rounded-lg text-[10px] uppercase font-bold tracking-wider border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/40 transition-colors"
+          >
+            {showSim ? "Hide Safety Simulator" : "🛠️ Open Safety Simulator"}
+          </button>
+          
+          {showSim && (
+            <div className="absolute bottom-full mb-2 right-0 left-0 p-3 panel bg-card border-destructive/30 shadow-2xl z-30 space-y-2 animate-fade-in">
+              <div className="text-[10px] font-bold text-destructive uppercase tracking-wider mb-1 flex items-center justify-between">
+                <span>⚠️ Safety & Threat Simulator</span>
+                <span className="text-[8px] text-muted-foreground font-normal">Create test alerts</span>
+              </div>
+              <div className="grid grid-cols-1 gap-1 text-[10px]">
+                <button
+                  onClick={() => triggerSim("intrusion", 4, "middle", "Unauthorized pedestrian detected walking on track line near PF 4.")}
+                  className="w-full py-1.5 rounded bg-secondary/50 text-left px-2 border border-border/60 hover:border-primary/50 hover:bg-secondary/80 font-medium text-foreground cursor-pointer"
+                >
+                  🚶 Track Intrusion (PF 4)
+                </button>
+                <button
+                  onClick={() => triggerSim("intrusion", 1, "front", "Motion alarm triggered in restricted Yard Corridor A.")}
+                  className="w-full py-1.5 rounded bg-secondary/50 text-left px-2 border border-border/60 hover:border-primary/50 hover:bg-secondary/80 font-medium text-foreground cursor-pointer"
+                >
+                  🚧 Restricted Yard Intrusion
+                </button>
+                <button
+                  onClick={() => triggerSim("fire", 9, "rear", "Smoke detection triggered in Food Court service zone near PF 9.")}
+                  className="w-full py-1.5 rounded bg-secondary/50 text-left px-2 border border-border/60 hover:border-primary/50 hover:bg-secondary/80 font-medium text-foreground cursor-pointer"
+                >
+                  🔥 Fire Alarm (Food Court)
+                </button>
+                <button
+                  onClick={() => triggerSim("medical", 12, "middle", "Passenger collapsed with heat stroke symptoms near platform benches.")}
+                  className="w-full py-1.5 rounded bg-secondary/50 text-left px-2 border border-border/60 hover:border-primary/50 hover:bg-secondary/80 font-medium text-foreground cursor-pointer"
+                >
+                  ✚ Passenger Cardiac Distress (PF 12)
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
